@@ -2,7 +2,7 @@ Ossvfs is a Filey-System interface to [OSS](http://www.aliyun.com/product/oss/)
 
 Ossvfs is reshaped from [Goofys](https://github.com/kahing/goofys). Thank the author of Goofys for his great work!
 
-Ossvfs is still under heavy development and have *NOT* been fully tested. Do *NOT*
+Ossvfs is still under heavy development and have **NOT** been fully tested. Do **NOT**
 use it in production now.
 
 # Overview
@@ -55,5 +55,4 @@ List of non-POSIX behaviors/limitations:
       filesystem for
       [Google Cloud Storage](https://cloud.google.com/storage/). Goofys
       borrowed some skeleton code from this project.
-  * [S3Proxy](https://github.com/andrewgaul/s3proxy) is used for `go test`
   * [fuse binding](https://github.com/jacobsa/fuse), also used by `gcsfuse`
