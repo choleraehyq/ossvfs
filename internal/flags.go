@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/codegangsta/cli"
+	"github.com/denverdino/aliyungo/oss"
 )
 
 // Set up custom help text for goofys; in particular the usage section.
@@ -53,9 +54,9 @@ func NewApp() (app *cli.App) {
 	uid, gid := MyUserAndGroup()
 
 	app = &cli.App{
-		Name:     "goofys",
-		Version:  "0.0.2",
-		Usage:    "Mount an S3 bucket locally",
+		Name:     "ossvfs",
+		Version:  "0.0.1",
+		Usage:    "Mount an Aliyun OSS bucket locally",
 		HideHelp: true,
 		Writer:   os.Stderr,
 		Flags: []cli.Flag{
@@ -99,27 +100,26 @@ func NewApp() (app *cli.App) {
 			},
 
 			/////////////////////////
-			// S3
+			// OSS
 			/////////////////////////
 
 			cli.StringFlag{
 				Name:  "endpoint",
 				Value: "",
-				Usage: "The non-AWS endpoint to connect to." +
+				Usage: "The non-OSS endpoint to connect to." +
 					" Possible values: http://127.0.0.1:8081/",
-			},
-
-			cli.StringFlag{
-				Name:  "storage-class",
-				Value: "STANDARD",
-				Usage: "The type of storage to use when writing objects." +
-					" Possible values: REDUCED_REDUNDANCY, STANDARD (default), STANDARD_IA.",
 			},
 
 			cli.BoolFlag{
 				Name: "use-path-request",
 				Usage: "Use a path-style request instead of virtual host-style." +
 					" Needed for some private object stores.",
+			},
+
+			cli.BoolFlag{
+				Name: "internal",
+				Value: true,
+				Usage: "Whether the machine is an ECS instance.",
 			},
 
 			/////////////////////////
@@ -149,8 +149,8 @@ func NewApp() (app *cli.App) {
 			},
 
 			cli.BoolFlag{
-				Name:  "debug_s3",
-				Usage: "Enable S3-related debugging output.",
+				Name:  "debug_oss",
+				Usage: "Enable OSS-related debugging output.",
 			},
 		},
 	}
@@ -166,10 +166,13 @@ type FlagStorage struct {
 	Uid          uint32
 	Gid          uint32
 
-	// S3
-	Endpoint       string
-	StorageClass   string
-	UsePathRequest bool
+	// OSS
+	Endpoint       	string
+	UsePathRequest 	bool
+	Internal 	   	bool
+	Region 		   	oss.Region
+	AccessKeyId    	string
+	AccessKeySecret string
 
 	// Tuning
 	StatCacheTTL time.Duration
@@ -177,7 +180,7 @@ type FlagStorage struct {
 
 	// Debugging
 	DebugFuse bool
-	DebugS3   bool
+	DebugOSS  bool
 }
 
 func parseOptions(m map[string]string, s string) {
@@ -218,19 +221,25 @@ func PopulateFlags(c *cli.Context) (flags *FlagStorage) {
 		StatCacheTTL: c.Duration("stat-cache-ttl"),
 		TypeCacheTTL: c.Duration("type-cache-ttl"),
 
-		// S3
+		// OSS
 		Endpoint:       c.String("endpoint"),
-		StorageClass:   c.String("storage-class"),
 		UsePathRequest: c.Bool("use-path-request"),
+		Internal: 		c.Bool("internal")
 
 		// Debugging,
 		DebugFuse: c.Bool("debug_fuse"),
-		DebugS3:   c.Bool("debug_s3"),
+		DebugOSS:  c.Bool("debug_oss"),
 	}
 
 	// Handle the repeated "-o" flag.
 	for _, o := range c.StringSlice("o") {
 		parseOptions(flags.MountOptions, o)
 	}
+
+	// Get the region/AccessKeyId/AccessKeySecret
+	flags.AccessKeyId = os.Getenv("ACCESS_KEY_ID")
+	flags.AccessKeySecret = os.Getenv("ACCESS_KEY_SECRET")
+	flags.Region = oss.Region(os.Getenv("OSS_REGION"))
+	
 	return
 }

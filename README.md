@@ -1,61 +1,26 @@
-Goofys is a Filey-System interface to [S3](https://aws.amazon.com/s3/)
+Ossvfs is a Filey-System interface to [OSS](http://www.aliyun.com/product/oss/)
+
+Ossvfs is reshaped from [Goofys](https://github.com/kahing/goofys). Thank the author of Goofys for his great work!
+
+Ossvfs is still under heavy development and have *NOT* been fully tested. Do *NOT*
+use it in production now.
 
 # Overview
 
-Goofys allows you to mount an S3 bucket as a filey system.
+Ossvfs allows you to mount an OSS bucket as a filey system.
 
-It's a Filey System instead of a File System because goofys strives
+It's a Filey System instead of a File System because ossvfs strives
 for performance first and POSIX second. Particularly things that are
-difficult to support on S3 or would translate into more than one
+difficult to support on OSS or would translate into more than one
 round-trip would either fail (random writes) or faked (no per-file
-permission). Goofys does not have a on disk data cache, and
+permission). Ossvfs does not have a on disk data cache, and
 consistency model is close-to-open.
 
 # Usage
 
-Pre-built binaries are available [here](https://github.com/kahing/goofys/releases/). You may also need to install fuse-utils first.
-
-```ShellSession
-$ go get github.com/kahing/goofys
-$ go install github.com/kahing/goofys
-$ cat > ~/.aws/credentials
-[default]
-aws_access_key_id = AKID1234567890
-aws_secret_access_key = MY-SECRET-KEY
-$ $GOPATH/bin/goofys <bucket> <mountpoint>
-```
-
-Users can also configure credentials via the
-[AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-getting-started.html)
-or the `AWS_ACCESS_KEY` and `AWS_SECRET_KEY` environment variables.
-
 # Benchmark
 
-Using `--stat-cache-ttl 0 --type-cache-ttl 0` for goofys
-`-ostat_cache_expire=1` for s3fs to simulate cold runs. Detail for the
-benchmark can be found in
-[bench.sh](https://github.com/kahing/goofys/blob/master/bench/bench.sh). [Raw data](https://github.com/kahing/goofys/blob/master/bench/)
-is available as well. Test was run on an EC2 c4.xlarge in us-west-2a
-connecting to a bucket in us-west-2. Units are seconds.
-
-operation | goofys |  s3fs  | speedup over s3fs | riofs† | speedup over riofs |
-----------| ------ | ------ | ----------------- | ------ | ------------------ |
-Create 100 files | 5.31+/-0.35 | 33.7+/-2.5 | 6.3+/-0.6x | 1.43+/-0.21† | 0.27+/-0.04x
-Unlink 100 files | 3.1+/-0.4* | 6.6+/-0.6 | 2.12+/-0.32x | 3.63+/-0.33 | 1.17+/-0.17x
-Create 100 files (parallel) | 2.45+/-0.30 | 29.4+/-1.7* | 12.0+/-1.6x | 1.25+/-0.16† | 0.51+/-0.09x
-Unlink 100 files (parallel) | 3.10+/-0.35 | 9.7+/-1.7 | 3.1+/-0.7x | 4.2+/-0.4 | 1.36+/-0.20x
-ls with 1000 files | 0.73+/-0.05* | 36.8+/-2.5 | 50.1+/-5.1x | 9.9+/-0.5* | 13.4+/-1.2x
-Write 1GB | 11.7+/-1.8* | 38.4+/-6.2* | 3.3+/-0.7x | 117.1+/-3.7 | 10.0+/-1.6x
-Read 1GB | 17.1+/-1.1* | 22.0+/-6.7* | 1.3+/-0.4x | 25.2+/-1.0 | 1.48+/-0.11x
-Time to 1st byte | 0.036+/-0.013* | 1.1+/-0.4 | 31.0+/-16.8x | 0.275+/-0.018* | 7.6+/-2.9x
-
-(*) indicates the number of outliers removed
-
-(†) riofs does not wait for HTTP response before returning from `release()`
-
 # License
-
-Copyright (C) 2015 Ka-Hing Cheung
 
 Licensed under the Apache License, Version 2.0
 
@@ -81,9 +46,10 @@ List of non-POSIX behaviors/limitations:
 
 # References
 
-  * Data is stored on [Amazon S3](https://aws.amazon.com/s3/)
-  * [Amazon SDK for Go](https://github.com/aws/aws-sdk-go)
+  * Data is stored on [Aliyun OSS](http://www.aliyun.com/product/oss/)
+  * [Aliyun SDK for Go](https://github.com/denverdino/aliyungo)
   * Other related fuse filesystems
+    * [Goofys](https://github.com/kahing/goofys)
     * [s3fs](https://github.com/s3fs-fuse/s3fs-fuse): another popular filesystem for S3
     * [gcsfuse](https://github.com/googlecloudplatform/gcsfuse):
       filesystem for

@@ -16,7 +16,7 @@
 package main
 
 import (
-	. "github.com/kahing/goofys/internal"
+	. "github.com/choleraehyq/ossvfs/internal"
 
 	"fmt"
 	"os"
@@ -24,7 +24,7 @@ import (
 
 	"golang.org/x/net/context"
 
-	"github.com/aws/aws-sdk-go/aws"
+	"github.com/denverdino/aliyungo/oss"
 
 	"github.com/codegangsta/cli"
 
@@ -66,24 +66,12 @@ func mount(
 	mountPoint string,
 	flags *FlagStorage) (mfs *fuse.MountedFileSystem, err error) {
 
-	awsConfig := &aws.Config{
-		Region: aws.String("us-west-2"),
-		Logger: GetLogger("s3"),
-		//LogLevel: aws.LogLevel(aws.LogDebug),
-	}
-	if len(flags.Endpoint) > 0 {
-		awsConfig.Endpoint = &flags.Endpoint
-	}
-	if flags.UsePathRequest {
-		awsConfig.S3ForcePathStyle = aws.Bool(true)
-	}
-
-	goofys := NewGoofys(bucketName, awsConfig, flags)
-	if goofys == nil {
+	ossvfs := NewOssvfs(bucketName, flags)
+	if ossvfs == nil {
 		err = fmt.Errorf("Mount: initialization failed")
 		return
 	}
-	server := fuseutil.NewFileSystemServer(goofys)
+	server := fuseutil.NewFileSystemServer(ossvfs)
 
 	fuseLog := GetLogger("fuse")
 

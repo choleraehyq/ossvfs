@@ -16,6 +16,7 @@ package internal
 
 import (
 	"fmt"
+	"http"
 	"os"
 	"sync"
 	"syscall"
@@ -23,10 +24,7 @@ import (
 
 	"golang.org/x/net/context"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/denverdino/aliyungo/oss"
 
 	"github.com/jacobsa/fuse"
 	"github.com/jacobsa/fuse/fuseops"
@@ -35,26 +33,25 @@ import (
 	"github.com/Sirupsen/logrus"
 )
 
-// goofys is a Filey System written in Go. All the backend data is
-// stored on S3 as is. It's a Filey System instead of a File System
+// ossvfs is a Filey System written in Go. All the backend data is
+// stored on Aliyun OSS as is. It's a Filey System instead of a File System
 // because it makes minimal effort at being POSIX
-// compliant. Particularly things that are difficult to support on S3
+// compliant. Particularly things that are difficult to support on OSS
 // or would translate into more than one round-trip would either fail
-// (rename non-empty dir) or faked (no per-file permission). goofys
+// (rename non-empty dir) or faked (no per-file permission). ossvfs
 // does not have a on disk data cache, and consistency model is
 // close-to-open.
 
-type Goofys struct {
+type Ossvfs struct {
 	fuseutil.NotImplementedFileSystem
-	bucket string
+	bucket     oss.Bucket
+	bucketName string
 
 	flags *FlagStorage
 
 	umask uint32
 
-	awsConfig *aws.Config
-	sess      *session.Session
-	s3        *s3.S3
+	client    *oss.Client
 	rootAttrs fuseops.InodeAttributes
 
 	bufferPool *BufferPool
@@ -88,58 +85,37 @@ type Goofys struct {
 	fileHandles map[fuseops.HandleID]*FileHandle
 }
 
-var s3Log = GetLogger("s3")
+var ossLog = GetLogger("oss")
 
-func NewGoofys(bucket string, awsConfig *aws.Config, flags *FlagStorage) *Goofys {
+func NewOssvfs(bucket string, flags *FlagStorage) *Ossvfs {
 	// Set up the basic struct.
-	fs := &Goofys{
-		bucket: bucket,
-		flags:  flags,
-		umask:  0122,
+	fs := &Ossvfs{
+		bucketName: bucket,
+		flags:      flags,
+		umask:      0122,
 	}
 
-	if flags.DebugS3 {
-		awsConfig.LogLevel = aws.LogLevel(aws.LogDebug | aws.LogDebugWithRequestErrors)
-		s3Log.Level = logrus.DebugLevel
+	fs.client = oss.NewOSSClient(flags.Region, flags.Internal,
+		flags.AccessKeyId, flags.AccessKeySecret)
+
+	fs.bucket = fs.client.Bucket(bucket)
+
+	if flags.DebugOSS {
+		Client.SetDebug(flags.DebugOSS)
+		ossLog.Level = logrus.DebugLevel
 	}
 
-	fs.awsConfig = awsConfig
-	fs.sess = session.New(awsConfig)
-	fs.s3 = s3.New(fs.sess)
-
-	params := &s3.GetBucketLocationInput{Bucket: &bucket}
-	resp, err := fs.s3.GetBucketLocation(params)
-	var fromRegion, toRegion string
+	location, err := fs.bucket.Location()
 	if err != nil {
-		if mapAwsError(err) == fuse.ENOENT {
+		if mapOssError(err) == fuse.ENOENT {
 			log.Errorf("bucket %v does not exist", bucket)
 			return nil
 		}
-		fromRegion, toRegion = parseRegionError(err)
-	} else {
-		s3Log.Debug(resp)
-
-		if resp.LocationConstraint == nil {
-			toRegion = "us-east-1"
-		} else {
-			toRegion = *resp.LocationConstraint
-		}
-
-		fromRegion = *awsConfig.Region
 	}
 
-	if len(toRegion) != 0 && fromRegion != toRegion {
-		s3Log.Infof("Switching from region '%v' to '%v'", fromRegion, toRegion)
-		awsConfig.Region = &toRegion
-		fs.sess = session.New(awsConfig)
-		fs.s3 = s3.New(fs.sess)
-		_, err = fs.s3.GetBucketLocation(params)
-		if err != nil {
-			log.Errorln(err)
-			return nil
-		}
-	} else if len(toRegion) == 0 && *awsConfig.Region != "milkyway" {
-		s3Log.Infof("Unable to detect bucket region, staying at '%v'", *awsConfig.Region)
+	if oss.Region(location) != fs.flags.Region {
+		log.Errorf("the location of bucket %v is wrong")
+		return nil
 	}
 
 	now := time.Now()
@@ -177,7 +153,7 @@ func NewGoofys(bucket string, awsConfig *aws.Config, flags *FlagStorage) *Goofys
 // Find the given inode. Panic if it doesn't exist.
 //
 // LOCKS_REQUIRED(fs.mu)
-func (fs *Goofys) getInodeOrDie(id fuseops.InodeID) (inode *Inode) {
+func (fs *Ossvfs) getInodeOrDie(id fuseops.InodeID) (inode *Inode) {
 	inode = fs.inodes[id]
 	if inode == nil {
 		panic(fmt.Sprintf("Unknown inode: %v", id))
@@ -186,7 +162,7 @@ func (fs *Goofys) getInodeOrDie(id fuseops.InodeID) (inode *Inode) {
 	return
 }
 
-func (fs *Goofys) StatFS(
+func (fs *Ossvfs) StatFS(
 	ctx context.Context,
 	op *fuseops.StatFSOp) (err error) {
 
@@ -204,7 +180,7 @@ func (fs *Goofys) StatFS(
 	return
 }
 
-func (fs *Goofys) GetInodeAttributes(
+func (fs *Ossvfs) GetInodeAttributes(
 	ctx context.Context,
 	op *fuseops.GetInodeAttributesOp) (err error) {
 
@@ -219,243 +195,80 @@ func (fs *Goofys) GetInodeAttributes(
 	return
 }
 
-const REGION_ERROR_MSG = "The authorization header is malformed; the region %s is wrong; expecting %s"
-
-func parseRegionError(err error) (fromRegion, toRegion string) {
-	if reqErr, ok := err.(awserr.RequestFailure); ok {
-		// A service error occurred
-		if reqErr.StatusCode() == 400 && reqErr.Code() == "AuthorizationHeaderMalformed" {
-			n, scanErr := fmt.Sscanf(reqErr.Message(), REGION_ERROR_MSG, &fromRegion, &toRegion)
-			if n != 2 || scanErr != nil {
-				fmt.Println(n, scanErr)
-				return
-			}
-			fromRegion = fromRegion[1 : len(fromRegion)-1]
-			toRegion = toRegion[1 : len(toRegion)-1]
-			return
-		} else if reqErr.StatusCode() == 501 {
-			// method not implemented,
-			// do nothing, use existing region
-		} else {
-			s3Log.Errorf("code=%v msg=%v request=%v\n",
-				reqErr.Message(), reqErr.StatusCode(), reqErr.RequestID())
-		}
-	}
-	return
-}
-
-func mapAwsError(err error) error {
-	if awsErr, ok := err.(awserr.Error); ok {
-		if reqErr, ok := err.(awserr.RequestFailure); ok {
-			// A service error occurred
-			switch reqErr.StatusCode() {
-			case 404:
-				return fuse.ENOENT
-			case 405:
-				return syscall.ENOTSUP
-			default:
-				s3Log.Errorf("code=%v msg=%v request=%v\n", reqErr.Message(), reqErr.StatusCode(), reqErr.RequestID())
-				return reqErr
-			}
-		} else {
-			// Generic AWS Error with Code, Message, and original error (if any)
-			s3Log.Errorf("code=%v msg=%v, err=%v\n", awsErr.Code(), awsErr.Message(), awsErr.OrigErr())
-			return awsErr
+func mapOssError(err error) error {
+	if ossErr, ok := err.(oss.Error); ok {
+		switch reqErr.StatusCode() {
+		case 404:
+			return fuse.ENOENT
+		case 405:
+			return syscall.ENOTSUP
+		default:
+			ossLog.Errorf("code=%v msg=%v request=%v\n", ossErr.Message, ossErr.StatusCode, ossErr.RequestID)
+			return ossErr
 		}
 	} else {
 		return err
 	}
 }
 
-func (fs *Goofys) LookUpInodeNotDir(name string, c chan s3.HeadObjectOutput, errc chan error) {
-	params := &s3.HeadObjectInput{Bucket: &fs.bucket, Key: &name}
-	resp, err := fs.s3.HeadObject(params)
+func (fs *Ossvfs) LookUpInodeNotDir(name string, c chan *http.Response, errc chan error) {
+	resp, err := fs.bucket.Head(name, nil)
 	if err != nil {
-		errc <- mapAwsError(err)
+		errc <- mapOssError(err)
 		return
 	}
 
-	s3Log.Debug(resp)
+	ossLog.Debug(resp)
+	c <- resp
+}
+
+func (fs *Ossvfs) LookUpInodeDir(name string, c chan *oss.ListResp, errc chan error) {
+
+	resp, err := fs.bucket.List(name+"/", "/", "", 1)
+	if err != nil {
+		errc <- mapOssError(err)
+		return
+	}
+
+	ossLog.Debug(resp)
 	c <- *resp
 }
 
-func (fs *Goofys) LookUpInodeDir(name string, c chan s3.ListObjectsOutput, errc chan error) {
-	params := &s3.ListObjectsInput{
-		Bucket:    &fs.bucket,
-		Delimiter: aws.String("/"),
-		MaxKeys:   aws.Int64(1),
-		Prefix:    aws.String(name + "/"),
-	}
-
-	resp, err := fs.s3.ListObjects(params)
-	if err != nil {
-		errc <- mapAwsError(err)
-		return
-	}
-
-	s3Log.Debug(resp)
-	c <- *resp
-}
-
-func (fs *Goofys) mpuCopyPart(from string, to string, mpuId string, bytes string, part int64, wg *sync.WaitGroup,
-	etag **string, errout *error) {
-
-	defer func() {
-		wg.Done()
-	}()
-
-	// XXX use CopySourceIfUnmodifiedSince to ensure that
-	// we are copying from the same object
-	params := &s3.UploadPartCopyInput{
-		Bucket:          &fs.bucket,
-		Key:             &to,
-		CopySource:      &from,
-		UploadId:        &mpuId,
-		CopySourceRange: &bytes,
-		PartNumber:      &part,
-	}
-
-	s3Log.Debug(params)
-
-	resp, err := fs.s3.UploadPartCopy(params)
-	if err != nil {
-		*errout = mapAwsError(err)
-		return
-	}
-
-	*etag = resp.CopyPartResult.ETag
-	return
-}
-
-func sizeToParts(size int64) int {
-	const PART_SIZE = 5 * 1024 * 1024 * 1024
-
-	nParts := int(size / PART_SIZE)
-	if size%PART_SIZE != 0 {
-		nParts++
-	}
-	return nParts
-}
-
-func (fs *Goofys) mpuCopyParts(size int64, from string, to string, mpuId string,
-	wg *sync.WaitGroup, etags []*string, err *error) {
-
-	const PART_SIZE = 5 * 1024 * 1024 * 1024
-
-	rangeFrom := int64(0)
-	rangeTo := int64(0)
-
-	for i := int64(1); rangeTo < size; i++ {
-		rangeFrom = rangeTo
-		rangeTo = i * PART_SIZE
-		if rangeTo > size {
-			rangeTo = size
-		}
-		bytes := fmt.Sprintf("bytes=%v-%v", rangeFrom, rangeTo-1)
-
-		wg.Add(1)
-		go fs.mpuCopyPart(from, to, mpuId, bytes, i, wg, &etags[i-1], err)
-	}
-}
-
-func (fs *Goofys) copyObjectMultipart(size int64, from string, to string, mpuId string) (err error) {
-	var wg sync.WaitGroup
-	nParts := sizeToParts(size)
-	etags := make([]*string, nParts)
-
-	if mpuId == "" {
-		params := &s3.CreateMultipartUploadInput{
-			Bucket:       &fs.bucket,
-			Key:          &to,
-			StorageClass: &fs.flags.StorageClass,
-		}
-
-		resp, err := fs.s3.CreateMultipartUpload(params)
-		if err != nil {
-			return mapAwsError(err)
-		}
-
-		mpuId = *resp.UploadId
-	}
-
-	fs.mpuCopyParts(size, from, to, mpuId, &wg, etags, &err)
-	wg.Wait()
-
-	if err != nil {
-		return
-	} else {
-		parts := make([]*s3.CompletedPart, nParts)
-		for i := 0; i < nParts; i++ {
-			parts[i] = &s3.CompletedPart{
-				ETag:       etags[i],
-				PartNumber: aws.Int64(int64(i + 1)),
-			}
-		}
-
-		params := &s3.CompleteMultipartUploadInput{
-			Bucket:   &fs.bucket,
-			Key:      &to,
-			UploadId: &mpuId,
-			MultipartUpload: &s3.CompletedMultipartUpload{
-				Parts: parts,
-			},
-		}
-
-		s3Log.Debug(params)
-
-		_, err = fs.s3.CompleteMultipartUpload(params)
-		if err != nil {
-			return mapAwsError(err)
-		}
-	}
-
-	return
-}
-
-func (fs *Goofys) copyObjectMaybeMultipart(size int64, from string, to string) (err error) {
+func (fs *Ossvfs) copyObjectMaybeMultipart(size int64, from string, to string) (err error) {
 	if size == -1 {
-		params := &s3.HeadObjectInput{Bucket: &fs.bucket, Key: &from}
-		resp, err := fs.s3.HeadObject(params)
+		size, err := fs.bucket.GetContentLength(from)
 		if err != nil {
-			return mapAwsError(err)
+			return mapOssError(err)
 		}
-
-		size = *resp.ContentLength
 	}
 
-	from = fs.bucket + "/" + from
+	from = fs.bucket.Path(from)
 
-	if size > 5*1024*1024*1024 {
-		return fs.copyObjectMultipart(size, from, to, "")
+	if size > 1*1024*1024*1024 {
+		return fs.CopyLargeFile(from, to, "application/octet-stream",
+			oss.Private, oss.Options{})
 	}
 
-	params := &s3.CopyObjectInput{
-		Bucket:       &fs.bucket,
-		CopySource:   &from,
-		Key:          &to,
-		StorageClass: &fs.flags.StorageClass,
-	}
-
-	_, err = fs.s3.CopyObject(params)
+	_, err = fs.bucket.PutCopy(to, oss.Private, oss.CopyOptions{}, from)
 	if err != nil {
-		err = mapAwsError(err)
+		err = mapOssError(err)
 	}
 
 	return
 }
 
-func (fs *Goofys) allocateInodeId() (id fuseops.InodeID) {
+func (fs *Ossvfs) allocateInodeId() (id fuseops.InodeID) {
 	id = fs.nextInodeID
 	fs.nextInodeID++
 	return
 }
 
 // returned inode has nil Id
-func (fs *Goofys) LookUpInodeMaybeDir(name string, fullName string) (inode *Inode, err error) {
+func (fs *Ossvfs) LookUpInodeMaybeDir(name string, fullName string) (inode *Inode, err error) {
 	errObjectChan := make(chan error, 1)
-	objectChan := make(chan s3.HeadObjectOutput, 1)
+	objectChan := make(chan *http.Response, 1)
 	errDirChan := make(chan error, 1)
-	dirChan := make(chan s3.ListObjectsOutput, 1)
+	dirChan := make(chan *oss.ListResp, 1)
 
 	go fs.LookUpInodeNotDir(fullName, objectChan, errObjectChan)
 	go fs.LookUpInodeDir(fullName, dirChan, errDirChan)
@@ -464,17 +277,17 @@ func (fs *Goofys) LookUpInodeMaybeDir(name string, fullName string) (inode *Inod
 
 	for {
 		select {
+		// TODO: if both object and object/ exists, return dir
 		case resp := <-objectChan:
-			// XXX/TODO if both object and object/ exists, return dir
 			inode = NewInode(&name, &fullName, fs.flags)
 			inode.Attributes = &fuseops.InodeAttributes{
-				Size:   uint64(*resp.ContentLength),
+				Size:   uint64(resp.ContentLength),
 				Nlink:  1,
 				Mode:   fs.flags.FileMode,
-				Atime:  *resp.LastModified,
-				Mtime:  *resp.LastModified,
-				Ctime:  *resp.LastModified,
-				Crtime: *resp.LastModified,
+				Atime:  resp.Header.Get("Last-Modified"),
+				Mtime:  resp.Header.Get("Last-Modified"),
+				Ctime:  resp.Header.Get("Last-Modified"),
+				Crtime: resp.Header.Get("Last-Modified"),
 				Uid:    fs.flags.Uid,
 				Gid:    fs.flags.Gid,
 			}
@@ -488,7 +301,7 @@ func (fs *Goofys) LookUpInodeMaybeDir(name string, fullName string) (inode *Inod
 					err = nil
 				}
 			} else {
-				// XXX retry
+				//TODO: retry
 			}
 		case resp := <-dirChan:
 			if len(resp.CommonPrefixes) != 0 || len(resp.Contents) != 0 {
@@ -504,12 +317,12 @@ func (fs *Goofys) LookUpInodeMaybeDir(name string, fullName string) (inode *Inod
 				}
 			}
 		case err = <-errDirChan:
-			// XXX retry
+			//TODO: retry
 		}
 	}
 }
 
-func (fs *Goofys) LookUpInode(
+func (fs *Ossvfs) LookUpInode(
 	ctx context.Context,
 	op *fuseops.LookUpInodeOp) (err error) {
 
@@ -545,7 +358,7 @@ func (fs *Goofys) LookUpInode(
 }
 
 // LOCKS_EXCLUDED(fs.mu)
-func (fs *Goofys) ForgetInode(
+func (fs *Ossvfs) ForgetInode(
 	ctx context.Context,
 	op *fuseops.ForgetInodeOp) (err error) {
 
@@ -566,7 +379,7 @@ func (fs *Goofys) ForgetInode(
 	return
 }
 
-func (fs *Goofys) OpenDir(
+func (fs *Ossvfs) OpenDir(
 	ctx context.Context,
 	op *fuseops.OpenDirOp) (err error) {
 	fs.mu.Lock()
@@ -590,7 +403,7 @@ func (fs *Goofys) OpenDir(
 }
 
 // LOCKS_EXCLUDED(fs.mu)
-func (fs *Goofys) ReadDir(
+func (fs *Ossvfs) ReadDir(
 	ctx context.Context,
 	op *fuseops.ReadDirOp) (err error) {
 
@@ -628,7 +441,7 @@ func (fs *Goofys) ReadDir(
 	return
 }
 
-func (fs *Goofys) ReleaseDirHandle(
+func (fs *Ossvfs) ReleaseDirHandle(
 	ctx context.Context,
 	op *fuseops.ReleaseDirHandleOp) (err error) {
 
@@ -645,7 +458,7 @@ func (fs *Goofys) ReleaseDirHandle(
 	return
 }
 
-func (fs *Goofys) OpenFile(
+func (fs *Ossvfs) OpenFile(
 	ctx context.Context,
 	op *fuseops.OpenFileOp) (err error) {
 	fs.mu.Lock()
@@ -668,7 +481,7 @@ func (fs *Goofys) OpenFile(
 	return
 }
 
-func (fs *Goofys) ReadFile(
+func (fs *Ossvfs) ReadFile(
 	ctx context.Context,
 	op *fuseops.ReadFileOp) (err error) {
 
@@ -681,7 +494,7 @@ func (fs *Goofys) ReadFile(
 	return
 }
 
-func (fs *Goofys) SyncFile(
+func (fs *Ossvfs) SyncFile(
 	ctx context.Context,
 	op *fuseops.SyncFileOp) (err error) {
 
@@ -693,7 +506,7 @@ func (fs *Goofys) SyncFile(
 	return
 }
 
-func (fs *Goofys) FlushFile(
+func (fs *Ossvfs) FlushFile(
 	ctx context.Context,
 	op *fuseops.FlushFileOp) (err error) {
 
@@ -706,7 +519,7 @@ func (fs *Goofys) FlushFile(
 	return
 }
 
-func (fs *Goofys) ReleaseFileHandle(
+func (fs *Ossvfs) ReleaseFileHandle(
 	ctx context.Context,
 	op *fuseops.ReleaseFileHandleOp) (err error) {
 	fs.mu.Lock()
@@ -716,7 +529,7 @@ func (fs *Goofys) ReleaseFileHandle(
 	return
 }
 
-func (fs *Goofys) CreateFile(
+func (fs *Ossvfs) CreateFile(
 	ctx context.Context,
 	op *fuseops.CreateFileOp) (err error) {
 
@@ -755,7 +568,7 @@ func (fs *Goofys) CreateFile(
 	return
 }
 
-func (fs *Goofys) MkDir(
+func (fs *Ossvfs) MkDir(
 	ctx context.Context,
 	op *fuseops.MkDirOp) (err error) {
 
@@ -786,7 +599,7 @@ func (fs *Goofys) MkDir(
 	return
 }
 
-func (fs *Goofys) RmDir(
+func (fs *Ossvfs) RmDir(
 	ctx context.Context,
 	op *fuseops.RmDirOp) (err error) {
 
@@ -798,14 +611,14 @@ func (fs *Goofys) RmDir(
 	return
 }
 
-func (fs *Goofys) SetInodeAttributes(
+func (fs *Ossvfs) SetInodeAttributes(
 	ctx context.Context,
 	op *fuseops.SetInodeAttributesOp) (err error) {
 	// do nothing, we don't support any of the changes
 	return
 }
 
-func (fs *Goofys) WriteFile(
+func (fs *Ossvfs) WriteFile(
 	ctx context.Context,
 	op *fuseops.WriteFileOp) (err error) {
 
@@ -822,7 +635,7 @@ func (fs *Goofys) WriteFile(
 	return
 }
 
-func (fs *Goofys) Unlink(
+func (fs *Ossvfs) Unlink(
 	ctx context.Context,
 	op *fuseops.UnlinkOp) (err error) {
 
@@ -834,7 +647,7 @@ func (fs *Goofys) Unlink(
 	return
 }
 
-func (fs *Goofys) Rename(
+func (fs *Ossvfs) Rename(
 	ctx context.Context,
 	op *fuseops.RenameOp) (err error) {
 
