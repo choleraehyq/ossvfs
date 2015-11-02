@@ -31,10 +31,7 @@ import (
 
 	"golang.org/x/net/context"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/denverdino/aliyungo/oss"
 
 	"github.com/jacobsa/fuse"
 	"github.com/jacobsa/fuse/fuseops"
@@ -71,26 +68,19 @@ func currentGid() uint32 {
 	return uint32(gid)
 }
 
-type GoofysTest struct {
-	fs        *Goofys
-	ctx       context.Context
-	awsConfig *aws.Config
-	s3        *s3.S3
-	sess      *session.Session
-	env       map[string]io.ReadSeeker
-}
-
-type S3Proxy struct {
-	jar    string
-	config string
-	cmd    *exec.Cmd
+type OssvfsTest struct {
+	fs     *Ossvfs
+	ctx    context.Context
+	client *oss.Client
+	bucket *oss.Bucket
+	env    map[string]io.ReadSeeker
 }
 
 func Test(t *testing.T) {
 	TestingT(t)
 }
 
-var _ = Suite(&GoofysTest{})
+var _ = Suite(&OssvfsTest{})
 
 func logOutput(t *C, tag string, r io.ReadCloser) {
 	in := bufio.NewScanner(r)
@@ -100,7 +90,7 @@ func logOutput(t *C, tag string, r io.ReadCloser) {
 	}
 }
 
-func (s *GoofysTest) waitFor(t *C, addr string) (err error) {
+func (s *OssvfsTest) waitFor(t *C, addr string) (err error) {
 	// wait for it to listen on port
 	for i := 0; i < 10; i++ {
 		var conn net.Conn
@@ -118,7 +108,10 @@ func (s *GoofysTest) waitFor(t *C, addr string) (err error) {
 	return
 }
 
-func (s *GoofysTest) SetUpSuite(t *C) {
+func (s *OssvfsTest) SetUpSuite(t *C) {
+	s.client = oss.NewOSSClient()
+}
+func (s *OssvfsTest) SetUpSuite(t *C) {
 	//addr := "play.minio.io:9000"
 	const LOCAL_TEST = true
 
@@ -153,10 +146,10 @@ func (s *GoofysTest) SetUpSuite(t *C) {
 	t.Assert(err, IsNil)
 }
 
-func (s *GoofysTest) TearDownSuite(t *C) {
+func (s *OssvfsTest) TearDownSuite(t *C) {
 }
 
-func (s *GoofysTest) setupEnv(t *C, bucket string, env map[string]io.ReadSeeker) {
+func (s *OssvfsTest) setupEnv(t *C, bucket string, env map[string]io.ReadSeeker) {
 	_, err := s.s3.CreateBucket(&s3.CreateBucketInput{
 		Bucket: &bucket,
 		//ACL: aws.String(s3.BucketCannedACLPrivate),
@@ -214,7 +207,7 @@ func RandStringBytesMaskImprSrc(n int) string {
 	return string(b)
 }
 
-func (s *GoofysTest) setupDefaultEnv(t *C) (bucket string) {
+func (s *OssvfsTest) setupDefaultEnv(t *C) (bucket string) {
 	s.env = map[string]io.ReadSeeker{
 		"file1":           nil,
 		"file2":           nil,
@@ -230,36 +223,36 @@ func (s *GoofysTest) setupDefaultEnv(t *C) (bucket string) {
 	return bucket
 }
 
-func (s *GoofysTest) SetUpTest(t *C) {
+func (s *OssvfsTest) SetUpTest(t *C) {
 	bucket := s.setupDefaultEnv(t)
 
 	s.ctx = context.Background()
 	flags := &FlagStorage{
 		StorageClass: "STANDARD",
 	}
-	s.fs = NewGoofys(bucket, s.awsConfig, flags)
+	s.fs = NewOssvfs(bucket, s.awsConfig, flags)
 }
 
-func (s *GoofysTest) getRoot(t *C) *Inode {
+func (s *OssvfsTest) getRoot(t *C) *Inode {
 	return s.fs.inodes[fuseops.RootInodeID]
 }
 
-func (s *GoofysTest) TestGetRootInode(t *C) {
+func (s *OssvfsTest) TestGetRootInode(t *C) {
 	root := s.getRoot(t)
 	t.Assert(root.Id, Equals, fuseops.InodeID(fuseops.RootInodeID))
 }
 
-func (s *GoofysTest) TestGetRootAttributes(t *C) {
+func (s *OssvfsTest) TestGetRootAttributes(t *C) {
 	_, err := s.getRoot(t).GetAttributes(s.fs)
 	t.Assert(err, IsNil)
 }
 
-func (s *GoofysTest) ForgetInode(t *C, inode fuseops.InodeID) {
+func (s *OssvfsTest) ForgetInode(t *C, inode fuseops.InodeID) {
 	err := s.fs.ForgetInode(s.ctx, &fuseops.ForgetInodeOp{Inode: inode})
 	t.Assert(err, IsNil)
 }
 
-func (s *GoofysTest) LookUpInode(t *C, name string) (in *Inode, err error) {
+func (s *OssvfsTest) LookUpInode(t *C, name string) (in *Inode, err error) {
 	parent := s.getRoot(t)
 
 	for {
@@ -281,7 +274,7 @@ func (s *GoofysTest) LookUpInode(t *C, name string) (in *Inode, err error) {
 	return
 }
 
-func (s *GoofysTest) TestLookUpInode(t *C) {
+func (s *OssvfsTest) TestLookUpInode(t *C) {
 	_, err := s.LookUpInode(t, "file1")
 	t.Assert(err, IsNil)
 
@@ -298,7 +291,7 @@ func (s *GoofysTest) TestLookUpInode(t *C) {
 	t.Assert(err, IsNil)
 }
 
-func (s *GoofysTest) TestGetInodeAttributes(t *C) {
+func (s *OssvfsTest) TestGetInodeAttributes(t *C) {
 	inode, err := s.getRoot(t).LookUp(s.fs, "file1")
 	t.Assert(err, IsNil)
 
@@ -307,7 +300,7 @@ func (s *GoofysTest) TestGetInodeAttributes(t *C) {
 	t.Assert(attr.Size, Equals, uint64(len("file1")))
 }
 
-func (s *GoofysTest) readDirFully(t *C, dh *DirHandle) (entries []fuseutil.Dirent) {
+func (s *OssvfsTest) readDirFully(t *C, dh *DirHandle) (entries []fuseutil.Dirent) {
 	en, err := dh.ReadDir(s.fs, fuseops.DirOffset(0))
 	t.Assert(err, IsNil)
 	t.Assert(en.Name, Equals, ".")
@@ -335,14 +328,14 @@ func namesOf(entries []fuseutil.Dirent) (names []string) {
 	return
 }
 
-func (s *GoofysTest) assertEntries(t *C, in *Inode, names []string) {
+func (s *OssvfsTest) assertEntries(t *C, in *Inode, names []string) {
 	dh := in.OpenDir()
 	defer dh.CloseDir()
 
 	t.Assert(namesOf(s.readDirFully(t, dh)), DeepEquals, names)
 }
 
-func (s *GoofysTest) TestReadDir(t *C) {
+func (s *OssvfsTest) TestReadDir(t *C) {
 	// test listing /
 	dh := s.getRoot(t).OpenDir()
 	defer dh.CloseDir()
@@ -365,7 +358,7 @@ func (s *GoofysTest) TestReadDir(t *C) {
 	s.assertEntries(t, in, []string{"file4"})
 }
 
-func (s *GoofysTest) TestReadFiles(t *C) {
+func (s *OssvfsTest) TestReadFiles(t *C) {
 	parent := s.getRoot(t)
 	dh := parent.OpenDir()
 	defer dh.CloseDir()
@@ -399,7 +392,7 @@ func (s *GoofysTest) TestReadFiles(t *C) {
 	}
 }
 
-func (s *GoofysTest) TestReadOffset(t *C) {
+func (s *OssvfsTest) TestReadOffset(t *C) {
 	root := s.getRoot(t)
 	f := "file1"
 
@@ -416,7 +409,7 @@ func (s *GoofysTest) TestReadOffset(t *C) {
 	t.Assert(string(buf[0:nread]), DeepEquals, f[1:])
 }
 
-func (s *GoofysTest) TestCreateFiles(t *C) {
+func (s *OssvfsTest) TestCreateFiles(t *C) {
 	fileName := "testCreateFile"
 
 	_, fh := s.getRoot(t).Create(s.fs, fileName)
@@ -448,7 +441,7 @@ func (s *GoofysTest) TestCreateFiles(t *C) {
 	defer resp.Body.Close()
 }
 
-func (s *GoofysTest) TestUnlink(t *C) {
+func (s *OssvfsTest) TestUnlink(t *C) {
 	fileName := "file1"
 
 	err := s.getRoot(t).Unlink(s.fs, fileName)
@@ -459,7 +452,7 @@ func (s *GoofysTest) TestUnlink(t *C) {
 	t.Assert(mapAwsError(err), Equals, fuse.ENOENT)
 }
 
-func (s *GoofysTest) testWriteFile(t *C, fileName string, size int64, write_size int) {
+func (s *OssvfsTest) testWriteFile(t *C, fileName string, size int64, write_size int) {
 	_, fh := s.getRoot(t).Create(s.fs, fileName)
 
 	buf := make([]byte, write_size)
@@ -501,12 +494,12 @@ func (s *GoofysTest) testWriteFile(t *C, fileName string, size int64, write_size
 	t.Assert(offset, Equals, size)
 }
 
-func (s *GoofysTest) TestWriteLargeFile(t *C) {
+func (s *OssvfsTest) TestWriteLargeFile(t *C) {
 	s.testWriteFile(t, "testLargeFile", 21*1024*1024, 128*1024)
 	s.testWriteFile(t, "testLargeFile2", 20*1024*1024, 128*1024)
 }
 
-func (s *GoofysTest) TestReadLargeFile(t *C) {
+func (s *OssvfsTest) TestReadLargeFile(t *C) {
 	s.testWriteFile(t, "testLargeFile", 20*1024*1024, 128*1024)
 
 	root := s.getRoot(t)
@@ -537,7 +530,7 @@ func (s *GoofysTest) TestReadLargeFile(t *C) {
 	}
 }
 
-func (s *GoofysTest) TestWriteManyFilesFile(t *C) {
+func (s *OssvfsTest) TestWriteManyFilesFile(t *C) {
 	var files sync.WaitGroup
 
 	for i := 0; i < 21; i++ {
@@ -552,11 +545,11 @@ func (s *GoofysTest) TestWriteManyFilesFile(t *C) {
 	files.Wait()
 }
 
-func (s *GoofysTest) testWriteFileNonAlign(t *C) {
+func (s *OssvfsTest) testWriteFileNonAlign(t *C) {
 	s.testWriteFile(t, "testWriteFileNonAlign", 6*1024*1024, 128*1024+1)
 }
 
-func (s *GoofysTest) TestMkDir(t *C) {
+func (s *OssvfsTest) TestMkDir(t *C) {
 	_, err := s.LookUpInode(t, "new_dir/file")
 	t.Assert(err, Equals, fuse.ENOENT)
 
@@ -577,7 +570,7 @@ func (s *GoofysTest) TestMkDir(t *C) {
 	t.Assert(err, IsNil)
 }
 
-func (s *GoofysTest) TestRmDir(t *C) {
+func (s *OssvfsTest) TestRmDir(t *C) {
 	root := s.getRoot(t)
 
 	err := root.RmDir(s.fs, "dir1")
@@ -591,7 +584,7 @@ func (s *GoofysTest) TestRmDir(t *C) {
 
 }
 
-func (s *GoofysTest) TestRename(t *C) {
+func (s *OssvfsTest) TestRename(t *C) {
 	root := s.getRoot(t)
 
 	from, to := "dir1", "new_dir"
