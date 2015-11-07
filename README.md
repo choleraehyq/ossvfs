@@ -22,6 +22,9 @@ consistency model is close-to-open.
 
 # License
 
+
+Copyright (C) 2015 Ka-Hing Cheung
+
 Licensed under the Apache License, Version 2.0
 
 # Current Status
@@ -56,5 +59,3 @@ List of non-POSIX behaviors/limitations:
       [Google Cloud Storage](https://cloud.google.com/storage/). Goofys
       borrowed some skeleton code from this project.
   * [fuse binding](https://github.com/jacobsa/fuse), also used by `gcsfuse`
-
-Copyright (C) 2015 Ka-Hing Cheung
