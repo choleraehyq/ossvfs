@@ -56,3 +56,5 @@ List of non-POSIX behaviors/limitations:
       [Google Cloud Storage](https://cloud.google.com/storage/). Goofys
       borrowed some skeleton code from this project.
   * [fuse binding](https://github.com/jacobsa/fuse), also used by `gcsfuse`
+
+Copyright (C) 2015 Ka-Hing Cheung
