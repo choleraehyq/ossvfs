@@ -18,7 +18,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"io/ioutils"
+	"io/ioutil"
 	"sort"
 	"sync"
 	"syscall"

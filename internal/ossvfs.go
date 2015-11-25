@@ -16,7 +16,7 @@ package internal
 
 import (
 	"fmt"
-	"http"
+	"net/http"
 	"os"
 	"sync"
 	"syscall"
