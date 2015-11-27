@@ -18,7 +18,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"io/ioutils"
+	"io/ioutil"
 	"sort"
 	"sync"
 	"syscall"
@@ -182,7 +182,7 @@ func (parent *Inode) Unlink(fs *Ossvfs, name string) (err error) {
 
 	fullName := parent.getChildName(name)
 
-	err := fs.bucket.Del(fullName)
+	err = fs.bucket.Del(fullName)
 	if err != nil {
 		return mapOssError(err)
 	}
@@ -230,7 +230,7 @@ func (parent *Inode) MkDir(
 	fullName := parent.getChildName(name) + "/"
 
 	// use a empty file to represent a dir
-	_, err = fs.bucket.Put(fullName, []byte{}, "content-type",
+	err = fs.bucket.Put(fullName, []byte{}, "content-type",
 		oss.Private, oss.Options{})
 	if err != nil {
 		err = mapOssError(err)
@@ -263,7 +263,7 @@ func isEmptyDir(fs *Ossvfs, fullName string) (isDir bool, err error) {
 	if len(resp.Contents) == 1 {
 		isDir = true
 
-		if *resp.Contents[0].Key != fullName {
+		if resp.Contents[0].Key != fullName {
 			err = fuse.ENOTEMPTY
 		}
 	}
@@ -289,7 +289,7 @@ func (parent *Inode) RmDir(
 
 	fullName += "/"
 
-	_, err = fs.bucket.Del(fullName)
+	err = fs.bucket.Del(fullName)
 	if err != nil {
 		return mapOssError(err)
 	}
@@ -320,7 +320,7 @@ func (fh *FileHandle) initMPU(fs *Ossvfs) {
 		fh.mpuWG.Done()
 	}()
 
-	resp, err := fs.bucket.InitMulti(fh.inode.FullName, "",
+	resp, err := fs.bucket.InitMulti(*fh.inode.FullName, "",
 		oss.Private, oss.Options{})
 
 	fh.mu.Lock()
@@ -349,15 +349,15 @@ func (fh *FileHandle) mpuPartNoSpawn(buf []byte, part int) (err error) {
 		panic(fmt.Sprintf("invalid part number: %v", part))
 	}
 
-	resp, err := fh.mpu.PutPart(n, bytes.NewReader(buf))
+	resp, err := fh.mpu.PutPart(part, bytes.NewReader(buf))
 	if err != nil {
 		return mapOssError(err)
 	}
 
-	en := &fh.etags[part-1]
+	en := fh.etags[part-1]
 
-	if *en != nil {
-		panic(fmt.Sprintf("etags for part %v already set: %v", part, **en))
+	if en != nil {
+		panic(fmt.Sprintf("etags for part %v already set: %v", part, *en))
 	}
 	*en = resp.ETag
 
@@ -553,12 +553,12 @@ func (fh *FileHandle) ReadFile(fs *Ossvfs, offset int64, buf []byte) (bytesRead 
 	offset += int64(bytesRead)
 	buf = buf[bytesRead:]
 
-	data, err := fs.bucket.Get(fh.inode.FullName)
+	data, err := fs.bucket.Get(*fh.inode.FullName)
 	if err != nil {
 		return bytesRead, mapOssError(err)
 	}
 
-	respReadCloser := ioutils.NopCloser(bytes.NewReader(data))
+	respReadCloser := ioutil.NopCloser(bytes.NewReader(data))
 	fh.reader = respReadCloser
 
 	nread, err := tryReadAll(respReadCloser, buf)
@@ -580,7 +580,7 @@ func (fh *FileHandle) flushSmallFile(fs *Ossvfs) (err error) {
 		defer fh.poolHandle.Free(buf)
 	}
 
-	_, err = fs.bucket.Put(fh.inode.FullName, buf, "content-type",
+	err = fs.bucket.Put(*fh.inode.FullName, buf, "content-type",
 		oss.Private, oss.Options{})
 	if err != nil {
 		err = mapOssError(err)
@@ -601,7 +601,7 @@ func (fh *FileHandle) FlushFile(fs *Ossvfs) (err error) {
 			fh.inode.logFuse("<-- FlushFile", err)
 			if fh.mpu != nil {
 				go func() {
-					_ := fh.mpu.Abort()
+					_ = fh.mpu.Abort()
 					fh.mpu = nil
 				}()
 			}
@@ -644,12 +644,12 @@ func (fh *FileHandle) FlushFile(fs *Ossvfs) (err error) {
 	for i := 0; i < nParts; i++ {
 		parts[i] = oss.Part{
 			N:    i + 1,
-			ETag: fh.etags[i],
+			ETag: *fh.etags[i],
 			Size: fh.size[i],
 		}
 	}
 
-	err := fh.mpu.Complete(parts)
+	err = fh.mpu.Complete(parts)
 	if err != nil {
 		return mapOssError(err)
 	}
@@ -704,7 +704,7 @@ func (parent *Inode) Rename(fs *Ossvfs, from string, newParent *Inode, to string
 		return err
 	}
 
-	_, err = fs.bucket.Del(fromFullName)
+	err = fs.bucket.Del(fromFullName)
 	if err != nil {
 		return mapOssError(err)
 	}
@@ -779,7 +779,7 @@ func (dh *DirHandle) ReadDir(fs *Ossvfs, offset fuseops.DirOffset) (*fuseutil.Di
 			prefix += "/"
 		}
 
-		resp, err := fs.bucket.List(prefix, "/", dh.Marker, 0)
+		resp, err := fs.bucket.List(prefix, "/", *dh.Marker, 0)
 		if err != nil {
 			return nil, mapOssError(err)
 		}
@@ -804,14 +804,18 @@ func (dh *DirHandle) ReadDir(fs *Ossvfs, offset fuseops.DirOffset) (*fuseutil.Di
 				continue
 			}
 			dh.Entries = append(dh.Entries, makeDirEntry(baseName, fuseutil.DT_File))
+			lastModifiedTime, err := time.Parse("2006-01-02T15:04:05.000Z", obj.LastModified)
+			if err != nil {
+				panic("Last " + obj.LastModified + " modified time is invalid")
+			}
 			dh.NameToEntry[baseName] = fuseops.InodeAttributes{
 				Size:   uint64(obj.Size),
 				Nlink:  1,
 				Mode:   fs.flags.FileMode,
-				Atime:  obj.LastModified,
-				Mtime:  obj.LastModified,
-				Ctime:  obj.LastModified,
-				Crtime: obj.LastModified,
+				Atime:  lastModifiedTime,
+				Mtime:  lastModifiedTime,
+				Ctime:  lastModifiedTime,
+				Crtime: lastModifiedTime,
 				Uid:    fs.flags.Uid,
 				Gid:    fs.flags.Gid,
 			}
@@ -826,8 +830,8 @@ func (dh *DirHandle) ReadDir(fs *Ossvfs, offset fuseops.DirOffset) (*fuseutil.Di
 			en.Offset = fuseops.DirOffset(i+dh.BaseOffset) + 1 + 2
 		}
 
-		if *resp.IsTruncated {
-			dh.Marker = resp.NextMarker
+		if resp.IsTruncated {
+			dh.Marker = &resp.NextMarker
 		} else {
 			dh.Marker = nil
 		}

@@ -24,8 +24,6 @@ import (
 
 	"golang.org/x/net/context"
 
-	"github.com/denverdino/aliyungo/oss"
-
 	"github.com/codegangsta/cli"
 
 	"github.com/jacobsa/fuse"

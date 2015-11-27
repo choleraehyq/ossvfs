@@ -16,7 +16,7 @@ package internal
 
 import (
 	"fmt"
-	"http"
+	"net/http"
 	"os"
 	"sync"
 	"syscall"
@@ -44,7 +44,7 @@ import (
 
 type Ossvfs struct {
 	fuseutil.NotImplementedFileSystem
-	bucket     oss.Bucket
+	bucket     *oss.Bucket
 	bucketName string
 
 	flags *FlagStorage
@@ -96,12 +96,12 @@ func NewOssvfs(bucket string, flags *FlagStorage) *Ossvfs {
 	}
 
 	fs.client = oss.NewOSSClient(flags.Region, flags.Internal,
-		flags.AccessKeyId, flags.AccessKeySecret)
+		flags.AccessKeyId, flags.AccessKeySecret, true)
 
 	fs.bucket = fs.client.Bucket(bucket)
 
 	if flags.DebugOSS {
-		Client.SetDebug(flags.DebugOSS)
+		fs.client.SetDebug(flags.DebugOSS)
 		ossLog.Level = logrus.DebugLevel
 	}
 
@@ -135,7 +135,7 @@ func NewOssvfs(bucket string, flags *FlagStorage) *Ossvfs {
 
 	fs.nextInodeID = fuseops.RootInodeID + 1
 	fs.inodes = make(map[fuseops.InodeID]*Inode)
-	root := NewInode(aws.String(""), aws.String(""), flags)
+	root := NewInode(getStringPointer(""), getStringPointer(""), flags)
 	root.Id = fuseops.RootInodeID
 	root.Attributes = &fs.rootAttrs
 
@@ -196,15 +196,15 @@ func (fs *Ossvfs) GetInodeAttributes(
 }
 
 func mapOssError(err error) error {
-	if ossErr, ok := err.(oss.Error); ok {
-		switch reqErr.StatusCode() {
+	if ossErr, ok := err.(*oss.Error); ok {
+		switch ossErr.StatusCode {
 		case 404:
 			return fuse.ENOENT
 		case 405:
 			return syscall.ENOTSUP
 		default:
-			ossLog.Errorf("code=%v msg=%v request=%v\n", ossErr.Message, ossErr.StatusCode, ossErr.RequestID)
-			return ossErr
+			ossLog.Errorf("code=%v msg=%v request=%v\n", ossErr.Message, ossErr.StatusCode, ossErr.RequestId)
+			return err
 		}
 	} else {
 		return err
@@ -231,12 +231,12 @@ func (fs *Ossvfs) LookUpInodeDir(name string, c chan *oss.ListResp, errc chan er
 	}
 
 	ossLog.Debug(resp)
-	c <- *resp
+	c <- resp
 }
 
 func (fs *Ossvfs) copyObjectMaybeMultipart(size int64, from string, to string) (err error) {
 	if size == -1 {
-		size, err := fs.bucket.GetContentLength(from)
+		size, err = fs.bucket.GetContentLength(from)
 		if err != nil {
 			return mapOssError(err)
 		}
@@ -245,7 +245,7 @@ func (fs *Ossvfs) copyObjectMaybeMultipart(size int64, from string, to string) (
 	from = fs.bucket.Path(from)
 
 	if size > 1*1024*1024*1024 {
-		return fs.CopyLargeFile(from, to, "application/octet-stream",
+		return fs.bucket.CopyLargeFile(from, to, "application/octet-stream",
 			oss.Private, oss.Options{})
 	}
 
@@ -280,14 +280,18 @@ func (fs *Ossvfs) LookUpInodeMaybeDir(name string, fullName string) (inode *Inod
 		// TODO: if both object and object/ exists, return dir
 		case resp := <-objectChan:
 			inode = NewInode(&name, &fullName, fs.flags)
+			lastModifiedTime, tmperr := http.ParseTime(resp.Header.Get("Last-Modified"))
+			if tmperr != nil {
+				panic("Last " + resp.Header.Get("Last-Modified") + " modified time is invalid")
+			}
 			inode.Attributes = &fuseops.InodeAttributes{
 				Size:   uint64(resp.ContentLength),
 				Nlink:  1,
 				Mode:   fs.flags.FileMode,
-				Atime:  resp.Header.Get("Last-Modified"),
-				Mtime:  resp.Header.Get("Last-Modified"),
-				Ctime:  resp.Header.Get("Last-Modified"),
-				Crtime: resp.Header.Get("Last-Modified"),
+				Atime:  lastModifiedTime,
+				Mtime:  lastModifiedTime,
+				Ctime:  lastModifiedTime,
+				Crtime: lastModifiedTime,
 				Uid:    fs.flags.Uid,
 				Gid:    fs.flags.Gid,
 			}
@@ -657,4 +661,8 @@ func (fs *Ossvfs) Rename(
 	fs.mu.Unlock()
 
 	return parent.Rename(fs, op.OldName, newParent, op.NewName)
+}
+
+func getStringPointer(v string) *string {
+	return &v
 }

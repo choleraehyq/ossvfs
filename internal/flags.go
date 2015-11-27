@@ -117,8 +117,7 @@ func NewApp() (app *cli.App) {
 			},
 
 			cli.BoolFlag{
-				Name: "internal",
-				Value: true,
+				Name:  "internal",
 				Usage: "Whether the machine is an ECS instance.",
 			},
 
@@ -167,11 +166,11 @@ type FlagStorage struct {
 	Gid          uint32
 
 	// OSS
-	Endpoint       	string
-	UsePathRequest 	bool
-	Internal 	   	bool
-	Region 		   	oss.Region
-	AccessKeyId    	string
+	Endpoint        string
+	UsePathRequest  bool
+	Internal        bool
+	Region          oss.Region
+	AccessKeyId     string
 	AccessKeySecret string
 
 	// Tuning
@@ -224,7 +223,7 @@ func PopulateFlags(c *cli.Context) (flags *FlagStorage) {
 		// OSS
 		Endpoint:       c.String("endpoint"),
 		UsePathRequest: c.Bool("use-path-request"),
-		Internal: 		c.Bool("internal")
+		Internal:       c.Bool("internal"),
 
 		// Debugging,
 		DebugFuse: c.Bool("debug_fuse"),
@@ -240,6 +239,6 @@ func PopulateFlags(c *cli.Context) (flags *FlagStorage) {
 	flags.AccessKeyId = os.Getenv("ACCESS_KEY_ID")
 	flags.AccessKeySecret = os.Getenv("ACCESS_KEY_SECRET")
 	flags.Region = oss.Region(os.Getenv("OSS_REGION"))
-	
+
 	return
 }
